@@ -1,0 +1,132 @@
+name: fps.ms 每日续期
+
+on:
+  schedule:
+    # 每天 UTC 02:00 执行（北京时间 10:00），可按需修改
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: '调试模式（打印更多日志）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  renew:
+    name: 执行续期
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      # ── 1. 拉取仓库 ─────────────────────────────────────────────
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      # ── 2. 安装 Python ──────────────────────────────────────────
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # ── 3. 安装依赖 ──────────────────────────────────────────────
+      - name: 安装 Python 依赖
+        run: |
+          pip install --upgrade pip
+          pip install seleniumbase
+          # seleniumbase 会自动管理 chromedriver，无需额外安装
+
+      # ── 4. 安装系统依赖（Chrome 运行时需要） ─────────────────────
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libnss3 libxss1 libasound2 libatk-bridge2.0-0 \
+            libgtk-3-0 libgbm1 libxkbcommon0 \
+            fonts-wqy-zenhei fonts-noto-cjk \
+            jq bc curl
+
+      # ── 5. 启用 Cloudflare WARP ──────────────────────────────────
+      - name: 启用 Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual      # IPv4 + IPv6
+          mode: client
+
+      # ── 6. 修复 DNS（WARP 可能覆盖 DNS） ─────────────────────────
+      - name: 修复 DNS 配置
+        run: |
+          echo "[INFO] 修复 DNS..."
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo systemctl disable systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n' \
+            | sudo tee /etc/resolv.conf
+          sudo chattr +i /etc/resolv.conf 2>/dev/null || true
+          sleep 2
+
+          echo "[INFO] 当前出口 IP:"
+          curl -s --max-time 10 https://api.ipify.org && echo
+
+          echo "[INFO] WARP 状态:"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace \
+            | grep -E 'ip=|warp=|loc=' || true
+
+          echo "[INFO] DNS 解析测试:"
+          nslookup panel.fps.ms 1.1.1.1 || echo "[WARN] 解析失败，继续"
+
+      # ── 7. 运行续期脚本 ───────────────────────────────────────────
+      - name: 运行 fps.ms 续期脚本
+        id: run_renew
+        env:
+          FPSMS_DISCORD_TOKEN: ${{ secrets.FPSMS_DISCORD_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # SeleniumBase 无头模式在 CI 中需要虚拟显示
+          DISPLAY: ':99'
+        run: |
+          # 启动虚拟显示（以防 UC Mode 需要）
+          Xvfb :99 -screen 0 1280x800x24 &>/dev/null &
+          sleep 2
+
+          echo "=============================="
+          echo " 开始执行 fps.ms 续期脚本"
+          echo " 时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "=============================="
+
+          python renew.py 2>&1 | tee renew.log
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          echo ""
+          echo "=============================="
+          echo " 脚本退出码: $EXIT_CODE"
+          echo "=============================="
+          exit $EXIT_CODE
+
+      # ── 8. 上传截图（调试用，可注释掉） ──────────────────────────
+      - name: 上传调试截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renew-screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # ── 9. 清理旧的 workflow 运行记录 ────────────────────────────
+      - name: 清理历史运行记录
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          delete_workflow_pattern: ${{ github.workflow }}
+          retain_days: 0
+          keep_minimum_runs: 2
