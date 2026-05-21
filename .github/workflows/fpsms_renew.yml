@@ -37,12 +37,11 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'requirements.txt'
 
-      # ── 3. 安装依赖 ──────────────────────────────────────────────
+      # ── 3. 安装 Python 依赖 ──────────────────────────────────────
       - name: 安装 Python 依赖
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          # seleniumbase 会自动管理 chromedriver，无需额外安装
 
       # ── 4. 安装系统依赖（Chrome 运行时 + 录屏工具） ──────────────
       - name: 安装系统依赖
@@ -56,36 +55,13 @@ jobs:
             xvfb x11-utils \
             ffmpeg
 
-      # ── 5. 启用 Cloudflare WARP ──────────────────────────────────
-      - name: 启用 Cloudflare WARP
-        uses: fscarmen/warp-on-actions@v1.3
-        with:
-          stack: dual      # IPv4 + IPv6
-          mode: client
-
-      # ── 6. 修复 DNS（WARP 可能覆盖 DNS） ─────────────────────────
-      - name: 修复 DNS 配置
+      # ── 5. 检查出口 IP ────────────────────────────────────────────
+      - name: 检查出口 IP
         run: |
-          echo "[INFO] 修复 DNS..."
-          sudo systemctl stop systemd-resolved 2>/dev/null || true
-          sudo systemctl disable systemd-resolved 2>/dev/null || true
-          sudo rm -f /etc/resolv.conf
-          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n' \
-            | sudo tee /etc/resolv.conf
-          sudo chattr +i /etc/resolv.conf 2>/dev/null || true
-          sleep 2
-
           echo "[INFO] 当前出口 IP:"
           curl -s --max-time 10 https://api.ipify.org && echo
 
-          echo "[INFO] WARP 状态:"
-          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace \
-            | grep -E 'ip=|warp=|loc=' || true
-
-          echo "[INFO] DNS 解析测试:"
-          nslookup panel.fps.ms 1.1.1.1 || echo "[WARN] 解析失败，继续"
-
-      # ── 7. 运行续期脚本（含录屏） ─────────────────────────────────
+      # ── 6. 运行续期脚本（含录屏） ─────────────────────────────────
       - name: 运行 fps.ms 续期脚本
         id: run_renew
         env:
@@ -96,16 +72,13 @@ jobs:
         run: |
           mkdir -p screenshots recordings
 
-          # 启动虚拟显示（1280x800，24位色深）
+          # 启动虚拟显示
           Xvfb :99 -screen 0 1280x800x24 &
           XVFB_PID=$!
           sleep 2
           echo "[INFO] Xvfb 已启动 (PID=$XVFB_PID)"
 
-          # 启动 ffmpeg 录屏（录制虚拟显示内容）
-          # -r 10: 10帧/秒（够用且文件小）
-          # -video_size: 与 Xvfb 分辨率一致
-          # -preset ultrafast: 编码速度优先（CI 环境 CPU 有限）
+          # 启动 ffmpeg 录屏
           ffmpeg -y \
             -f x11grab \
             -r 10 \
@@ -133,7 +106,7 @@ jobs:
           echo " 脚本退出码: $EXIT_CODE"
           echo "=============================="
 
-          # 优雅停止 ffmpeg（发送 q 让它正常写入结尾并关闭文件）
+          # 优雅停止 ffmpeg
           echo "[INFO] 停止录屏..."
           kill -INT $FFMPEG_PID 2>/dev/null || true
           wait $FFMPEG_PID 2>/dev/null || true
@@ -152,7 +125,7 @@ jobs:
 
           exit $EXIT_CODE
 
-      # ── 8. 上传截图 ───────────────────────────────────────────────
+      # ── 7. 上传截图 ───────────────────────────────────────────────
       - name: 上传调试截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -162,7 +135,7 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
-      # ── 9. 上传录屏视频 ────────────────────────────────────────────
+      # ── 8. 上传录屏视频 ────────────────────────────────────────────
       - name: 上传录屏视频
         if: always()
         uses: actions/upload-artifact@v4
@@ -172,7 +145,7 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
-      # ── 10. 清理旧的 workflow 运行记录 ────────────────────────────
+      # ── 9. 清理旧的 workflow 运行记录 ────────────────────────────
       - name: 清理历史运行记录
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
