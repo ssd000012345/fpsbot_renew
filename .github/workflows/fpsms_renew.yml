@@ -35,15 +35,16 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
 
       # ── 3. 安装依赖 ──────────────────────────────────────────────
       - name: 安装 Python 依赖
         run: |
           pip install --upgrade pip
-          pip install seleniumbase
+          pip install -r requirements.txt
           # seleniumbase 会自动管理 chromedriver，无需额外安装
 
-      # ── 4. 安装系统依赖（Chrome 运行时需要） ─────────────────────
+      # ── 4. 安装系统依赖（Chrome 运行时 + 录屏工具） ──────────────
       - name: 安装系统依赖
         run: |
           sudo apt-get update -qq
@@ -51,7 +52,9 @@ jobs:
             libnss3 libxss1 libasound2 libatk-bridge2.0-0 \
             libgtk-3-0 libgbm1 libxkbcommon0 \
             fonts-wqy-zenhei fonts-noto-cjk \
-            jq bc curl
+            jq bc curl \
+            xvfb x11-utils \
+            ffmpeg
 
       # ── 5. 启用 Cloudflare WARP ──────────────────────────────────
       - name: 启用 Cloudflare WARP
@@ -82,19 +85,40 @@ jobs:
           echo "[INFO] DNS 解析测试:"
           nslookup panel.fps.ms 1.1.1.1 || echo "[WARN] 解析失败，继续"
 
-      # ── 7. 运行续期脚本 ───────────────────────────────────────────
+      # ── 7. 运行续期脚本（含录屏） ─────────────────────────────────
       - name: 运行 fps.ms 续期脚本
         id: run_renew
         env:
           FPSMS_DISCORD_TOKEN: ${{ secrets.FPSMS_DISCORD_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # SeleniumBase 无头模式在 CI 中需要虚拟显示
           DISPLAY: ':99'
         run: |
-          # 启动虚拟显示（以防 UC Mode 需要）
-          Xvfb :99 -screen 0 1280x800x24 &>/dev/null &
+          mkdir -p screenshots recordings
+
+          # 启动虚拟显示（1280x800，24位色深）
+          Xvfb :99 -screen 0 1280x800x24 &
+          XVFB_PID=$!
           sleep 2
+          echo "[INFO] Xvfb 已启动 (PID=$XVFB_PID)"
+
+          # 启动 ffmpeg 录屏（录制虚拟显示内容）
+          # -r 10: 10帧/秒（够用且文件小）
+          # -video_size: 与 Xvfb 分辨率一致
+          # -preset ultrafast: 编码速度优先（CI 环境 CPU 有限）
+          ffmpeg -y \
+            -f x11grab \
+            -r 10 \
+            -video_size 1280x800 \
+            -i :99 \
+            -vcodec libx264 \
+            -preset ultrafast \
+            -crf 30 \
+            recordings/session.mp4 \
+            2>recordings/ffmpeg.log &
+          FFMPEG_PID=$!
+          echo "[INFO] ffmpeg 录屏已启动 (PID=$FFMPEG_PID)"
+          sleep 1
 
           echo "=============================="
           echo " 开始执行 fps.ms 续期脚本"
@@ -108,9 +132,27 @@ jobs:
           echo "=============================="
           echo " 脚本退出码: $EXIT_CODE"
           echo "=============================="
+
+          # 优雅停止 ffmpeg（发送 q 让它正常写入结尾并关闭文件）
+          echo "[INFO] 停止录屏..."
+          kill -INT $FFMPEG_PID 2>/dev/null || true
+          wait $FFMPEG_PID 2>/dev/null || true
+
+          # 停止 Xvfb
+          kill $XVFB_PID 2>/dev/null || true
+
+          # 检查录像文件
+          if [ -f recordings/session.mp4 ]; then
+            SIZE=$(du -sh recordings/session.mp4 | cut -f1)
+            echo "[INFO] 录像文件: recordings/session.mp4 ($SIZE)"
+          else
+            echo "[WARN] 录像文件未生成，检查 recordings/ffmpeg.log"
+            cat recordings/ffmpeg.log || true
+          fi
+
           exit $EXIT_CODE
 
-      # ── 8. 上传截图（调试用，可注释掉） ──────────────────────────
+      # ── 8. 上传截图 ───────────────────────────────────────────────
       - name: 上传调试截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,7 +162,17 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
-      # ── 9. 清理旧的 workflow 运行记录 ────────────────────────────
+      # ── 9. 上传录屏视频 ────────────────────────────────────────────
+      - name: 上传录屏视频
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renew-recording-${{ github.run_number }}
+          path: recordings/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # ── 10. 清理旧的 workflow 运行记录 ────────────────────────────
       - name: 清理历史运行记录
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
