@@ -1,9 +1,9 @@
 name: fps.ms 每日续期
 
 on:
-  schedule:
+  #schedule:
     # 每天 UTC 02:00 执行（北京时间 10:00），可按需修改
-    - cron: '0 2 * * *'
+    #- cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       debug_mode:
